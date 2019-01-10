@@ -4,6 +4,7 @@ import sys, datetime
 import whois
 from elasticsearch import Elasticsearch, helpers
 import requests, json
+import socket, threading
 from urlparse import urlparse
 from BaseHTTPServer import BaseHTTPRequestHandler,HTTPServer
 
@@ -89,7 +90,27 @@ def load_disk_cache():
 	#print("DEBUG: DISK CACHE CONTENT:" + disk_cache_content)
 	return disk_cache_json
 
-#mem_cache = {}
+def handle_whois_client_connection(client_socket):
+	request = client_socket.recv(1024)
+	print 'Received {}'.format(request)
+	question = request.rstrip()
+	answer=whois_lookup(question)
+	text = json.dumps(answer,indent=4, sort_keys=True, default=str)
+	#answer='DEBUG'
+	client_socket.send(text)
+	client_socket.close()
+
+def whois_server():
+	bind_ip = '0.0.0.0'
+	bind_port = 49
+	server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+	server.bind((bind_ip, bind_port))
+	server.listen(5)  # max # of open connections
+	while True:
+		client_sock, address = server.accept()
+		print 'Accepted connection from {}:{}'.format(address[0], address[1])
+		client_handler = threading.Thread(target=handle_whois_client_connection, args=(client_sock,) )
+		client_handler.start()
 
 
 def whois_lookup(question):
@@ -116,6 +137,8 @@ mem_cache = load_disk_cache()
 stats = {"mem_cache_hit":0,"mem_cache_miss":0,"disk_cache_hit":0,"disk_cache_miss":0,"total_queries":0}
 
 if var == '-d':
+	## Run the Whois server, DEBUG I need to thread this
+	whois_server()
 	## Run the web server, I'll figure out how to background later
 	web_port=8080
 	server = HTTPServer(('', web_port), webHandler)
