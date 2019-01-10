@@ -15,7 +15,19 @@ class webHandler(BaseHTTPRequestHandler):
 				self.send_response(200)
 				self.send_header('Content-type','text/html')
 				self.end_headers()
-				html = '<html><body>Submit your Whois query<br><form action="/api"><input type="text" name="query"><br><input type="submit"></form></body></html>'
+				html = '<html><body>Submit your Whois query<br><form action="/api"><input type="text" name="query"><br><input type="submit"></form><a href="/stats">Stats</a></body></html>'
+				self.wfile.write(html)
+			elif self.path=="/stats":
+				self.send_response(200)
+				self.send_header('Content-type','text/html')
+				self.end_headers()
+				## Calculate some stats, some day there will be pretty ASCII graphs
+				mem_cache_size = sum([sys.getsizeof(v) for v in mem_cache.values()])
+				mem_cache_size += sum([sys.getsizeof(k) for k in mem_cache.keys()])
+				html = '<html><body><h2>Proxy Cache Stats</h2><br>Total Queries: ' + str(stats['total_queries']) 
+				html += '<br>Mem_Cache Hits: ' + str(stats['mem_cache_hit'])
+				html += '<br>Mem_Cache Records:' + str(len(mem_cache)) + '</body></html>'
+				html += '<br>Mem_Cache Bytes:' + str(mem_cache_size) + '</body></html>'
 				self.wfile.write(html)
 			elif self.path.startswith("/api?query"):
 				query = urlparse(self.path).query
@@ -43,7 +55,7 @@ class webHandler(BaseHTTPRequestHandler):
 			self.send_error(500,'Something went wrong. Query was: %s' % e)
 
 	def do_POST(self):
-		self.send_error(404,'Something went wrong. You can\'t Post to this site. ')
+		self.send_error(404,'Something went wrong. You can not POST to this site. ')
 		return
 
 
@@ -81,11 +93,14 @@ def load_disk_cache():
 
 
 def whois_lookup(question):
+	stats['total_queries'] +=1
 	if question in mem_cache.keys():
 		print("DEBUG: Mem_Cache hit")
+		stats['mem_cache_hit']+=1
 		results = mem_cache[question]
 	else:
 		print("DEBUG: Mem_Cache miss")
+		stats['mem_cache_miss']+=1
 		results = whois.whois(question)
 		#send_to_elasticsearch(results)
 		mem_cache[question] = results
@@ -98,6 +113,7 @@ def whois_lookup(question):
 
 var = sys.argv[1]
 mem_cache = load_disk_cache()
+stats = {"mem_cache_hit":0,"mem_cache_miss":0,"disk_cache_hit":0,"disk_cache_miss":0,"total_queries":0}
 
 if var == '-d':
 	## Run the web server, I'll figure out how to background later
