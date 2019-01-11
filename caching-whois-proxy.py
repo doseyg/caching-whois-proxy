@@ -1,13 +1,27 @@
 #!/usr/bin/python
+## Glen Dosey <doseyg@r-networks.net>
+## 2019-01-09
+## MIT License
+## Copyright (c) 2018 Glen Dosey
+## caching-whois-proxy.py 
+## https://github.com/doseyg/caching-whois-proxy
+
 import sys, datetime
 ## This is the python-whois package; pip install python-whois
 import whois
 from elasticsearch import Elasticsearch, helpers
 import requests, json
-import socket, threading
+import socket, threading, datetime
 from urlparse import urlparse
 from BaseHTTPServer import BaseHTTPRequestHandler,HTTPServer
 
+## Global variables
+cache_max_age=7
+web_port=80
+#use_mem_cache=1
+#use_disk_cache=1
+#use_elastic_cache=0
+#only_use_cache=0
 
 class webHandler(BaseHTTPRequestHandler):
 	def do_GET(self):
@@ -90,10 +104,11 @@ def load_disk_cache():
 	#print("DEBUG: DISK CACHE CONTENT:" + disk_cache_content)
 	return disk_cache_json
 
-def handle_whois_client_connection(client_socket):
+def handle_whois_client_connection(client_socket,address):
 	request = client_socket.recv(1024)
-	print 'Received {}'.format(request)
 	question = request.rstrip()
+	timestamp = datetime.datetime.now().strftime('%d/%b/%Y %H:%M:%S')
+	print '{} - - [{}]  "WHOIS {}"'.format(address[0],timestamp,question)
 	answer=whois_lookup(question)
 	text = json.dumps(answer,indent=4, sort_keys=True, default=str)
 	#answer='DEBUG'
@@ -101,29 +116,49 @@ def handle_whois_client_connection(client_socket):
 	client_socket.close()
 
 def whois_server():
+	## Listen on port 43 for connections from a Whois client
 	bind_ip = '0.0.0.0'
-	bind_port = 49
+	whois_port = 43
 	server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-	server.bind((bind_ip, bind_port))
+	server.bind((bind_ip, whois_port))
 	server.listen(5)  # max # of open connections
+	print 'Started whois listener on port ' , whois_port
 	while True:
 		client_sock, address = server.accept()
-		print 'Accepted connection from {}:{}'.format(address[0], address[1])
-		client_handler = threading.Thread(target=handle_whois_client_connection, args=(client_sock,) )
+		#print 'Accepted connection from {}:{}'.format(address[0], address[1])
+		client_handler = threading.Thread(target=handle_whois_client_connection, args=(client_sock,address) )
 		client_handler.start()
 
+def web_server():
+	server = HTTPServer(('', web_port), webHandler)
+	print 'Started http server on port ' , web_port
+	server.serve_forever()
 
 def whois_lookup(question):
+	## Wrap the python-whois lookup with a cache
 	stats['total_queries'] +=1
 	if question in mem_cache.keys():
-		print("DEBUG: Mem_Cache hit")
+		timestamp = datetime.datetime.now().strftime('%d/%b/%Y %H:%M:%S')
+		print 'cache - - [{}]  "{}" "Mem_Cache:hit"'.format(timestamp,question)
 		stats['mem_cache_hit']+=1
 		results = mem_cache[question]
+		## Calculate the cached record timestamp, and the timestamp cache_max_age ago
+		cache_expire_date = datetime.datetime.now() - datetime.timedelta(days=cache_max_age)
+		cache_entry_age = datetime.datetime.strptime(results['cached_on'], '%Y-%m-%d %H:%M:%S.%f')
+		## If the cache entry age has exceeded the configured limit, requery and update the cache
+		if cache_entry_age > cache_expire_date:
+			results = whois.whois(question)
+			#send_to_elasticsearch(results)
+			results['cached_on']=datetime.datetime.now()
+			mem_cache[question] = results
 	else:
-		print("DEBUG: Mem_Cache miss")
+		timestamp = datetime.datetime.now().strftime('%d/%b/%Y %H:%M:%S')
+		print 'cache - - [{}]  "{}" "Mem_Cache:miss"'.format(timestamp,question)
 		stats['mem_cache_miss']+=1
 		results = whois.whois(question)
 		#send_to_elasticsearch(results)
+		## Add a cached_on entry to the record so we can determine when to age it out
+		results['cached_on']=datetime.datetime.now()
 		mem_cache[question] = results
 	disk_cache = open('whois.cache', 'w')  
 	disk_cache.write(json.dumps(mem_cache, default=str))  
@@ -137,13 +172,12 @@ mem_cache = load_disk_cache()
 stats = {"mem_cache_hit":0,"mem_cache_miss":0,"disk_cache_hit":0,"disk_cache_miss":0,"total_queries":0}
 
 if var == '-d':
-	## Run the Whois server, DEBUG I need to thread this
-	whois_server()
-	## Run the web server, I'll figure out how to background later
-	web_port=8080
-	server = HTTPServer(('', web_port), webHandler)
-	print 'Started httpserver on port ' , web_port
-	server.serve_forever()
+	## Run the Whois network server
+	net_thread = threading.Thread(target=whois_server)
+	net_thread.daemon = True
+	net_thread.start()
+	web_server()
+
 else:
 	## looks like run from command line
 	answer = whois_lookup(var)
