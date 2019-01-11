@@ -11,7 +11,7 @@ import sys, datetime
 import whois
 from elasticsearch import Elasticsearch, helpers
 import requests, json
-import socket, threading, datetime
+import socket, threading, datetime, syslog
 from urlparse import urlparse
 from BaseHTTPServer import BaseHTTPRequestHandler,HTTPServer
 
@@ -20,7 +20,8 @@ cache_max_age=7
 web_port=80
 #use_mem_cache=1
 #use_disk_cache=1
-#use_elastic_cache=0
+use_elasticsearch_cache=0
+#use_syslog=1
 #only_use_cache=0
 
 class webHandler(BaseHTTPRequestHandler):
@@ -67,7 +68,7 @@ class webHandler(BaseHTTPRequestHandler):
 				self.send_error(404,'Something went wrong. Query was: %s' % self.path)
 			return
 		except Exception as e:
-			self.send_error(500,'Something went wrong. Query was: %s' % e)
+			self.send_error(500,'Something went wrong. Error was: %s' % e)
 
 	def do_POST(self):
 		self.send_error(404,'Something went wrong. You can not POST to this site. ')
@@ -75,12 +76,45 @@ class webHandler(BaseHTTPRequestHandler):
 
 
 
-def send_to_elasticsearch(args,myjson):
-	json_string = json.dumps(myjson['_source'])
+def send_to_elasticsearch(myjson):
+	json_string = json.dumps(myjson, default=str)
 	json_list = []
 	json_list.append(json_string)
-	es = Elasticsearch('http://elastic:changeme@elk_server:9200')
+	es = Elasticsearch('http://172.16.135.144:9200')
 	helpers.bulk(es,json_list,index='whois_cache', doc_type='generated')
+
+def elasticsearch_query(query):
+	cache_expire_date = datetime.datetime.now() - datetime.timedelta(days=cache_max_age)
+	es = Elasticsearch('http://172.16.135.144:9200')
+	body = {
+	      "size": 100,
+	      "from": 0,
+	      "query": {
+		 "bool" : {
+		    "must": [{
+		          "query_string" : {
+		                "cache_question" : question
+		          }},
+		          {"range" : {
+		               "cached_on": {
+		                   "gt" : cache_expire_age
+		               }
+		           }
+		    }],
+		    "must_not":[],
+		    "should":[]
+		}
+	       }
+	 }
+	print("cache - - Initiating Elasticsearch query: %s" % self.query)
+	results = es.search( size=limit, index=whois_cache, body=body, request_timeout=240 )
+	return results
+
+def send_to_syslog(myjson):
+	syslog_server='127.0.0.1'
+	json_string = json.dumps(myjson, default=str)
+	syslog.syslog(json_string)
+
 
 def send_to_splunk(myjson):
 	SPLUNK_URI='https://splunk_server:8088/services/collector'
@@ -134,6 +168,35 @@ def web_server():
 	print 'Started http server on port ' , web_port
 	server.serve_forever()
 
+def update_cache(question,results):
+	## Add a cached_on entry to the record so we can determine when to age it out
+	results['cached_on']=datetime.datetime.now()
+	results['cache_question']=question
+	if use_elasticsearch_cache == 1:
+			es_thread = threading.Thread(target=send_to_elasticsearch, args=(results,))
+			es_thread.daemon = False
+			es_thread.start()
+	#send_to_syslog(results)
+	mem_cache[question] = results
+
+def query_cache(question):
+	## This function is not used yet. code is inline elsewhere
+	results = mem_cache[question]
+	results = disk_cache[quesion]
+	results = elasticsearch_query(question)
+	## Calculate the cached record timestamp, and the timestamp cache_max_age ago
+	cache_expire_date = datetime.datetime.now() - datetime.timedelta(days=cache_max_age)
+	## When read in from disk or ELK, this is unicode, when passed from python-whois is datetime 
+	if isinstance(results['cached_on'],unicode):
+		cache_entry_age = datetime.datetime.strptime(results['cached_on'], '%Y-%m-%d %H:%M:%S.%f')
+	else:
+		cache_entry_age = results['cached_on']
+	## If the cache entry age has exceeded the configured limit, requery and update the cache
+	if cache_entry_age < cache_expire_date:
+		results = whois.whois(question)
+		update_cache(question,results)
+	return results
+
 def whois_lookup(question):
 	## Wrap the python-whois lookup with a cache
 	stats['total_queries'] +=1
@@ -144,22 +207,21 @@ def whois_lookup(question):
 		results = mem_cache[question]
 		## Calculate the cached record timestamp, and the timestamp cache_max_age ago
 		cache_expire_date = datetime.datetime.now() - datetime.timedelta(days=cache_max_age)
-		cache_entry_age = datetime.datetime.strptime(results['cached_on'], '%Y-%m-%d %H:%M:%S.%f')
+		## When read in from disk or ELK, this is unicode, when passed from python-whois is datetime 
+		if isinstance(results['cached_on'],unicode):
+			cache_entry_age = datetime.datetime.strptime(results['cached_on'], '%Y-%m-%d %H:%M:%S.%f')
+		else:
+			cache_entry_age = results['cached_on']
 		## If the cache entry age has exceeded the configured limit, requery and update the cache
-		if cache_entry_age > cache_expire_date:
+		if cache_entry_age < cache_expire_date:
 			results = whois.whois(question)
-			#send_to_elasticsearch(results)
-			results['cached_on']=datetime.datetime.now()
-			mem_cache[question] = results
+			update_cache(question,results)
 	else:
 		timestamp = datetime.datetime.now().strftime('%d/%b/%Y %H:%M:%S')
 		print 'cache - - [{}]  "{}" "Mem_Cache:miss"'.format(timestamp,question)
 		stats['mem_cache_miss']+=1
 		results = whois.whois(question)
-		#send_to_elasticsearch(results)
-		## Add a cached_on entry to the record so we can determine when to age it out
-		results['cached_on']=datetime.datetime.now()
-		mem_cache[question] = results
+		update_cache(question,results)
 	disk_cache = open('whois.cache', 'w')  
 	disk_cache.write(json.dumps(mem_cache, default=str))  
 	disk_cache.close()
