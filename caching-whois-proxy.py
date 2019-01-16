@@ -16,13 +16,26 @@ from urlparse import urlparse
 from BaseHTTPServer import BaseHTTPRequestHandler,HTTPServer
 
 ## Global variables
+## How long to cache a record before asking again, in days. Applies to all cache types
 cache_max_age=7
+## Port to run web server on
 web_port=80
-#use_mem_cache=1
-#use_disk_cache=1
-use_elasticsearch_cache=0
-#use_syslog=1
-#only_use_cache=0
+use_mem_cache=True
+## Maximum amount of memory to use for cache. Total script usage will exceed this.
+mem_cache_max_size=102400
+
+## Store the cache in a file on disk to preload when restarting. Use with mem_cache
+use_disk_cache=True
+## File to store disk_cache in
+disk_cache_filename = "/tmp/whois.cache"
+## How often to write mem_cache to disk, in minutes
+disk_cache_write_interval=5
+
+## Use elasticsearch to store the cache
+use_elasticsearch_cache=False
+#use_syslog=True
+## only use cached references, do not send whois queries. 
+only_use_cache=False
 
 class webHandler(BaseHTTPRequestHandler):
 	def do_GET(self):
@@ -125,18 +138,30 @@ def send_to_splunk(myjson):
 	result = response.text
 	#return result
 
+def manage_mem_cache():
+	mem_cache_size = sum([sys.getsizeof(v) for v in mem_cache.values()])
+	mem_cache_size += sum([sys.getsizeof(k) for k in mem_cache.keys()])
 
 def load_disk_cache():
 	## Initialize the memory cache from the disk cache
 	try:
-		disk_cache_file = open('whois.cache', 'r') 
-		disk_cache_content = disk_cache_file.read()
+		disk_cache_file_handle = open(disk_cache_filename, 'r') 
+		disk_cache_content = disk_cache_file_handle.read()
 		disk_cache_json = json.loads(disk_cache_content)
-		disk_cache_file.close()
+		disk_cache_file_handle.close()
 	except:
 		disk_cache_json = {}
 	#print("DEBUG: DISK CACHE CONTENT:" + disk_cache_content)
 	return disk_cache_json
+	
+def flush_mem_cache_to_disk():
+	## If the disk_cache_write_interval time has been exceeded, copy the mem_cache to a file on disk
+	disk_cache_flush_expire = datetime.datetime.now() - datetime.timedelta(minutes=disk_cache_write_interval)
+	if stats["disk_cache_last_written"] < disk_cache_flush_expire:
+		stats["disk_cache_last_written"] = datetime.datetime.now()
+		disk_cache_file_handle = open(disk_cache_file_name, 'w')  
+		disk_cache_file_handle.write(json.dumps(mem_cache, default=str))  
+		disk_cache_file_handle.close()
 
 def handle_whois_client_connection(client_socket,address):
 	request = client_socket.recv(1024)
@@ -172,7 +197,7 @@ def update_cache(question,results):
 	## Add a cached_on entry to the record so we can determine when to age it out
 	results['cached_on']=datetime.datetime.now()
 	results['cache_question']=question
-	if use_elasticsearch_cache == 1:
+	if use_elasticsearch_cache == True:
 			es_thread = threading.Thread(target=send_to_elasticsearch, args=(results,))
 			es_thread.daemon = False
 			es_thread.start()
@@ -182,8 +207,8 @@ def update_cache(question,results):
 def query_cache(question):
 	## This function is not used yet. code is inline elsewhere
 	results = mem_cache[question]
-	results = disk_cache[quesion]
-	results = elasticsearch_query(question)
+	#results = disk_cache[quesion]
+	#results = elasticsearch_query(question)
 	## Calculate the cached record timestamp, and the timestamp cache_max_age ago
 	cache_expire_date = datetime.datetime.now() - datetime.timedelta(days=cache_max_age)
 	## When read in from disk or ELK, this is unicode, when passed from python-whois is datetime 
@@ -202,7 +227,7 @@ def whois_lookup(question):
 	stats['total_queries'] +=1
 	if question in mem_cache.keys():
 		timestamp = datetime.datetime.now().strftime('%d/%b/%Y %H:%M:%S')
-		print 'cache - - [{}]  "{}" "Mem_Cache:hit"'.format(timestamp,question)
+		print ('cache - - [' + timestamp + ']  "' + question + '" "Mem_Cache:hit"')
 		stats['mem_cache_hit']+=1
 		results = mem_cache[question]
 		## Calculate the cached record timestamp, and the timestamp cache_max_age ago
@@ -218,20 +243,21 @@ def whois_lookup(question):
 			update_cache(question,results)
 	else:
 		timestamp = datetime.datetime.now().strftime('%d/%b/%Y %H:%M:%S')
-		print 'cache - - [{}]  "{}" "Mem_Cache:miss"'.format(timestamp,question)
+		print ('cache - - [' + timestamp + ']  "' + question + '" "Mem_Cache:miss"')
 		stats['mem_cache_miss']+=1
 		results = whois.whois(question)
 		update_cache(question,results)
-	disk_cache = open('whois.cache', 'w')  
-	disk_cache.write(json.dumps(mem_cache, default=str))  
-	disk_cache.close()
+	if use_disk_cache == True:
+		flush_mem_cache_to_disk()
 	return results
 
 
 
 var = sys.argv[1]
-mem_cache = load_disk_cache()
-stats = {"mem_cache_hit":0,"mem_cache_miss":0,"disk_cache_hit":0,"disk_cache_miss":0,"total_queries":0}
+load_timestamp = datetime.datetime.now()
+stats = {"mem_cache_hit":0,"mem_cache_miss":0,"disk_cache_hit":0,"disk_cache_miss":0,"total_queries":0,"disk_cache_last_written":load_timestamp}
+if use_disk_cache == True:
+	mem_cache = load_disk_cache()
 
 if var == '-d':
 	## Run the Whois network server
