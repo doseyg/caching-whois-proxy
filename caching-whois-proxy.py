@@ -159,7 +159,7 @@ def flush_mem_cache_to_disk():
 	disk_cache_flush_expire = datetime.datetime.now() - datetime.timedelta(minutes=disk_cache_write_interval)
 	if stats["disk_cache_last_written"] < disk_cache_flush_expire:
 		stats["disk_cache_last_written"] = datetime.datetime.now()
-		disk_cache_file_handle = open(disk_cache_file_name, 'w')  
+		disk_cache_file_handle = open(disk_cache_filename, 'w')  
 		disk_cache_file_handle.write(json.dumps(mem_cache, default=str))  
 		disk_cache_file_handle.close()
 
