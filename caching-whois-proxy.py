@@ -22,14 +22,14 @@ cache_max_age=7
 web_port=80
 use_mem_cache=True
 ## Maximum amount of memory to use for cache. Total script usage will exceed this.
-mem_cache_max_size=102400
+mem_cache_max_size=10240
 
 ## Store the cache in a file on disk to preload when restarting. Use with mem_cache
 use_disk_cache=True
 ## File to store disk_cache in
 disk_cache_filename = "/tmp/whois.cache"
 ## How often to write mem_cache to disk, in minutes
-disk_cache_write_interval=5
+disk_cache_write_interval=3
 
 ## Use elasticsearch to store the cache
 use_elasticsearch_cache=False
@@ -139,8 +139,28 @@ def send_to_splunk(myjson):
 	#return result
 
 def manage_mem_cache():
+	oldest_key = [None, None, None, None, None]
 	mem_cache_size = sum([sys.getsizeof(v) for v in mem_cache.values()])
 	mem_cache_size += sum([sys.getsizeof(k) for k in mem_cache.keys()])
+	if mem_cache_size > mem_cache_max_size:
+		for key in mem_cache:
+			print ("DEBUG key: " + key)
+			if oldest_key[0] is None:
+				oldest_key[0] = key
+				print ("DEBUG oldest: " + oldest_key[0])
+			## this sort of works. Its possible the first entry is the oldest, in which case only 1 item is removed instead of 4. 
+			elif mem_cache[key]['cached_on'] < mem_cache[oldest_key[0]]['cached_on']:
+				oldest_key[4] = oldest_key[3]
+				oldest_key[3] = oldest_key[2]
+				oldest_key[2] = oldest_key[1]
+				oldest_key[1] = oldest_key[0]
+				oldest_key[0] = key
+				print ("DEBUG oldest: " + oldest_key[0])
+		for i in range (0, 4):
+			if oldest_key[i] is not None:
+				mem_cache.pop(oldest_key[i])
+				timestamp = datetime.datetime.now().strftime('%d/%b/%Y %H:%M:%S')
+				print ('cache - - [' + timestamp + ']  "' + oldest_key[i] + '" "Mem_Cache:purge due to size exceeded"')
 
 def load_disk_cache():
 	## Initialize the memory cache from the disk cache
@@ -148,6 +168,11 @@ def load_disk_cache():
 		disk_cache_file_handle = open(disk_cache_filename, 'r') 
 		disk_cache_content = disk_cache_file_handle.read()
 		disk_cache_json = json.loads(disk_cache_content)
+		##Convert cached_on timestamp from string back to datetime.datetime object
+		for key in disk_cache_json:
+			if isinstance(disk_cache_json[key]['cached_on'],unicode):
+				disk_cache_json[key]['cached_on'] = datetime.datetime.strptime(disk_cache_json[key]['cached_on'], '%Y-%m-%d %H:%M:%S.%f')
+		
 		disk_cache_file_handle.close()
 	except:
 		disk_cache_json = {}
@@ -203,12 +228,16 @@ def update_cache(question,results):
 			es_thread.start()
 	#send_to_syslog(results)
 	mem_cache[question] = results
+	## We only need to write the cache to disk and manage it's size if we are adding an entry, so these go here
+	if use_disk_cache == True:
+		flush_mem_cache_to_disk()
+	manage_mem_cache()
 
 def query_cache(question):
 	## This function is not used yet. code is inline elsewhere
 	results = mem_cache[question]
-	#results = disk_cache[quesion]
-	#results = elasticsearch_query(question)
+	results = disk_cache[quesion]
+	results = elasticsearch_query(question)
 	## Calculate the cached record timestamp, and the timestamp cache_max_age ago
 	cache_expire_date = datetime.datetime.now() - datetime.timedelta(days=cache_max_age)
 	## When read in from disk or ELK, this is unicode, when passed from python-whois is datetime 
@@ -247,8 +276,6 @@ def whois_lookup(question):
 		stats['mem_cache_miss']+=1
 		results = whois.whois(question)
 		update_cache(question,results)
-	if use_disk_cache == True:
-		flush_mem_cache_to_disk()
 	return results
 
 
@@ -270,3 +297,4 @@ else:
 	## looks like run from command line
 	answer = whois_lookup(var)
 	print(answer)
+
