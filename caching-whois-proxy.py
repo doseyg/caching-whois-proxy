@@ -10,10 +10,12 @@ import sys, datetime
 ## This is the python-whois package; pip install python-whois
 import whois
 import requests, json
-import socket, threading, datetime, syslog
+import socket, threading, datetime, syslog, collections, time
 from urlparse import urlparse
+#import urllib
 from elasticsearch import Elasticsearch, helpers
 from BaseHTTPServer import BaseHTTPRequestHandler,HTTPServer
+#from http.server import BaseHTTPRequestHandler,HTTPServer
 
 ########### Global Configuration variables ################
 ## How long to cache a record before asking again, in days. Applies to all cache types
@@ -23,27 +25,36 @@ enable_web_server=True
 web_port=80
 use_mem_cache=True
 ## Maximum amount of memory to use for cache. Total script usage will exceed this.
-mem_cache_max_size=10240
+mem_cache_max_size=102400000
 
 ## Store the cache in a file on disk to preload when restarting. Use with mem_cache
 use_disk_cache=True
 ## File to store disk_cache in
-disk_cache_filename = "/tmp/whois.cache"
+disk_cache_filename = "/var/run/whois.cache"
 ## How often to write mem_cache to disk, in minutes
 disk_cache_write_interval=3
-
+logfile = "/var/log/caching-whois-proxy.log"
 ## Use elasticsearch to store the cache
 use_elasticsearch_cache=False
 ## The elasticsearch server to use, format http://user:pass@hostname:9200
-elasticsearch_server='http://172.16.135.145:9200'
+elasticsearch_server='http://127.0.0.1:9200'
 ## Send a copy of the whois lookup results to syslog 
 use_syslog=True
 ## only use cached references, do not send whois queries. You must side-load the disk_cache or elasticsearch for this to work 
 only_use_cache=False
 ## What value to return if use_only_cache is True, and the question is not in the cache
 not_cached_result=None
-
+## How often to allow a new query, in seconds
+rate_limit_queries=5
+rate_limit_use_backlog=True
+rate_limit_backlog_rate=5
+rate_limit_backlog_size=1000
 ###############  No configuration below this line ###########################
+
+def logger(content):
+	log=open(logfile,"a")
+	log.write(content + "\n")
+	log.close()
 
 class webHandler(BaseHTTPRequestHandler):
 	def do_GET(self):
@@ -65,27 +76,42 @@ class webHandler(BaseHTTPRequestHandler):
 				html += '<br>Mem_Cache Hits: ' + str(stats['mem_cache_hit'])
 				html += '<br>Mem_Cache Records:' + str(len(mem_cache)) 
 				html += '<br>Mem_Cache Bytes:' + str(mem_cache_size) 
+				html += '<br>Exceeded Rate Limit: ' + str(stats['exceeded_rate_limit'])
+				html += '<br>Elasticsearch Hits:' + str(stats['elasticsearch_cache_hit']) + '</body></html>'
+				self.wfile.write(html)
+			elif self.path=="/config":
+				self.send_response(200)
+				self.send_header('Content-type','text/html')
+				self.end_headers()
+				html = '<html><body><h2>Proxy Cache Config</h2><br>Use_mem_cache: ' + str(use_mem_cache) 
+				html += '<br>Mem_Cache Max Size: ' + str(mem_cache_max_size)
+				html += '<br>Cache Max Age:' + str(cache_max_age) 
+				html += '<br>rate_limit_queries:' + str(rate_limit_queries) 
 				html += '<br>Elasticsearch Hits:' + str(stats['elasticsearch_cache_hit']) + '</body></html>'
 				self.wfile.write(html)
 			elif self.path.startswith("/api?query"):
 				query = urlparse(self.path).query
+				#query = urllib.parse.urlparse(self.path).query
 				query_args = dict(args.split("=") for args in query.split("&"))
 				question = query_args['query']
 				answer = whois_lookup(question)
 				self.send_response(200)
 				self.send_header('Content-type','text/json')
 				self.end_headers()
-				self.wfile.write(json.dumps(answer,indent=4, sort_keys=True, default=str))
+				self.wfile.write(json.dumps(answer,indent=4, default=str))
 
 			elif self.path.startswith("/api?cache"):
 				query = urlparse(self.path).query
+				#query = urllib.parse.urlparse(self.path).query
 				query_args = dict(args.split("=") for args in query.split("&"))
-				whois_query = query_args['cache']
+				question = query_args['cache']
 				self.send_response(200)
 				self.send_header('Content-type','text/html')
 				self.end_headers()
 				html = 'success'
 				self.wfile.write(html)
+				my_thread = threading.Thread(target=whois_lookup, args=(question,))
+				my_thread.start()
 			else:
 				self.send_error(404,'Something went wrong. Query was: %s' % self.path)
 			return
@@ -95,6 +121,9 @@ class webHandler(BaseHTTPRequestHandler):
 	def do_POST(self):
 		self.send_error(404,'Something went wrong. You can not POST to this site. ')
 		return
+	def log_message(self,format,*args):
+		my_message = self.address_string() + " - - [" + self.log_date_time_string() + "] " + str(args) 
+		logger(my_message)
 
 
 
@@ -106,7 +135,7 @@ def send_to_elasticsearch(myjson):
 	try:
 		helpers.bulk(es,json_list,index='whois_cache', doc_type='generated')
 	except Exception as e:
-		print("cache - - Failed to perform elasticsearch insert")
+		logger("cache - - Failed to perform elasticsearch insert: " + str(e))
 
 
 def elasticsearch_query(question):
@@ -127,17 +156,18 @@ def elasticsearch_query(question):
 		}
 	       }
 	 }
-	print("cache - - Initiating Elasticsearch query: %s" % question)
+	logger("cache - - Initiating Elasticsearch query: %s" % question)
 	try:
 		results = es.search( size=limit, index='whois_cache', body=body, request_timeout=240 )
 	except Exception as e:
-		print("cache - - Failed to perform elasticsearch query")
+		logger("cache - - Failed to perform elasticsearch query")
 		results = None
 	return results
 
 def send_to_syslog(myjson):
 	syslog_server='127.0.0.1'
 	json_string = json.dumps(myjson, default=str)
+	#syslog.openlog(syslog.LOG_LOCAL4)
 	syslog.syslog(json_string)
 
 
@@ -170,7 +200,7 @@ def manage_mem_cache():
 			if oldest_key[i] is not None:
 				mem_cache.pop(oldest_key[i])
 				timestamp = datetime.datetime.now().strftime('%d/%b/%Y %H:%M:%S')
-				print ('cache - - [' + timestamp + ']  "' + oldest_key[i] + '" "Mem_Cache:purge due to size exceeded"')
+				logger('cache - - [' + timestamp + ']  "' + oldest_key[i] + '" "Mem_Cache:purge due to size exceeded"')
 
 def load_disk_cache():
 	## Initialize the memory cache from the disk cache
@@ -203,12 +233,39 @@ def handle_whois_client_connection(client_socket,address):
 	request = client_socket.recv(1024)
 	question = request.rstrip()
 	timestamp = datetime.datetime.now().strftime('%d/%b/%Y %H:%M:%S')
-	print '{} - - [{}]  "WHOIS {}"'.format(address[0],timestamp,question)
+	logger(address[0] + ' - - ['+timestamp+']  "WHOIS '+ question)
 	answer=whois_lookup(question)
-	text = json.dumps(answer,indent=4, sort_keys=True, default=str)
+	text = json.dumps(answer,indent=4, sort_keys=False, default=str)
 	#answer='DEBUG'
 	client_socket.send(text)
 	client_socket.close()
+
+def backlog_worker():
+	global backlog_questions
+	logger("Started backlog thread")
+	while(True):
+		run=1
+		time.sleep(rate_limit_backlog_rate)
+		##logger("backlog - - - thread heartbeat")
+		try:
+			while(run==1):
+				question = backlog_questions.popleft()
+				if question in mem_cache.keys():
+					logger("backlog - - - question found in mem_cache, removing: " + str(question))
+					continue
+				elif use_elasticsearch_cache == True and query_elasticsearch_cache(question) is not None:
+					logger("backlog - - - question found in elastic_cache, removing: " + str(question))
+					continue
+				else:
+					results = query_whois_internet(question)
+					logger("backlog - - - queried whois from backlog: " + str(question))
+					run=0
+		except IndexError, e:
+			logger ('backlog - - - Queue is empty: ' + str(e) )
+			continue
+		except Exception as e:
+			logger ('backlog - - - Error in backlog_thread: ' + str(e))
+			continue
 
 def whois_server():
 	## Listen on port 43 for connections from a Whois client
@@ -217,7 +274,7 @@ def whois_server():
 	server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 	server.bind((bind_ip, whois_port))
 	server.listen(5)  # max # of open connections
-	print 'Started whois listener on port ' , whois_port
+	logger ('Started whois listener on port ' + str(whois_port))
 	while True:
 		client_sock, address = server.accept()
 		#print 'Accepted connection from {}:{}'.format(address[0], address[1])
@@ -227,7 +284,7 @@ def whois_server():
 def web_server():
 	## This is just a stub function to call the full web server
 	server = HTTPServer(('', web_port), webHandler)
-	print 'Started http server on port ' , web_port
+	logger( 'Started http server on port ' + str( web_port))
 	server.serve_forever()
 
 def update_cache(question,results):
@@ -248,13 +305,28 @@ def update_cache(question,results):
 	manage_mem_cache()
 
 def query_whois_internet(question):
+	global rate_limit_timestamp
+	global rate_limit_use_backlog
+	global backlog_questions
+	my_rate = rate_limit_timestamp + datetime.timedelta(seconds=rate_limit_queries)
+	if threading.currentThread().getName() == 'backlog_worker':
+		my_rate = datetime.datetime.now()
 	## This function performs a whois query to the internet, caching results
 	if only_use_cache == True:
 		results = not_cached_result
 		return results
+	elif my_rate > datetime.datetime.now() :
+		logger("ratelimit - - exceeded configured request interval: " + str(question))
+		stats['exceeded_rate_limit']+=1
+		if rate_limit_use_backlog == True:
+			logger("ratelimit - - adding question to backlog: " + str(question))
+			backlog_questions.append(question)
+		return None
 	else:
 		results = whois.whois(question)
 		update_cache(question,results)
+		if threading.currentThread().getName() != 'backlog_worker':
+			rate_limit_timestamp=datetime.datetime.now()
 		return results
 
 
@@ -271,6 +343,7 @@ def query_mem_cache(question):
 	## If the cache entry age has exceeded the configured limit, requery and update the cache
 	if cache_entry_age < cache_expire_date:
 		results = query_whois_internet(question)
+		#results = 'Expired'
 	return results
 
 def query_elasticsearch_cache(question):
@@ -289,6 +362,7 @@ def query_elasticsearch_cache(question):
 	## If the cache entry age has exceeded the configured limit, requery and update the cache
 	if cache_entry_age < cache_expire_date:
 		results = query_whois_internet(question)
+		#results = 'Expired'
 	return results
 	
 
@@ -297,19 +371,19 @@ def whois_lookup(question):
 	timestamp = datetime.datetime.now().strftime('%d/%b/%Y %H:%M:%S')
 	stats['total_queries'] +=1
 	if question in mem_cache.keys():
-		print ('cache - - [' + timestamp + ']  "' + question + '" "Mem_Cache:hit"')
+		logger ('cache - - [' + timestamp + ']  "' + question + '" "Mem_Cache:hit"')
 		stats['mem_cache_hit']+=1
 		results = query_mem_cache(question)
 	## FIXME this is inefficient, we do 2 elasticsearch queries, should only do one. 
 	elif use_elasticsearch_cache == True and query_elasticsearch_cache(question) is not None:
-		print ('cache - - [' + timestamp + ']  "' + question + '" "Elasticsearch_Cache:hit"')
+		logger ('cache - - [' + timestamp + ']  "' + question + '" "Elasticsearch_Cache:hit"')
 		stats['elasticsearch_cache_hit']+=1
 		results = query_elasticsearch_cache(question)
 		if results is not None:
 			update_cache(question,results)
 			
 	else:
-		print ('cache - - [' + timestamp + ']  "' + question + '" "Mem_Cache:miss"')
+		logger('cache - - [' + timestamp + ']  "' + question + '" "Mem_Cache:miss"')
 		stats['mem_cache_miss']+=1
 		results = query_whois_internet(question)
 	return results
@@ -322,17 +396,23 @@ if len(sys.argv) != 2:
 
 var = sys.argv[1]
 load_timestamp = datetime.datetime.now()
-stats = {"mem_cache_hit":0,"mem_cache_miss":0,"disk_cache_hit":0,"disk_cache_miss":0,"total_queries":0,"disk_cache_last_written":load_timestamp,"elasticsearch_cache_hit":0,"elasticsearch_cache_miss":0}
+rate_limit_timestamp = datetime.datetime.now()
+stats = {"mem_cache_hit":0,"mem_cache_miss":0,"disk_cache_hit":0,"disk_cache_miss":0,"total_queries":0,"disk_cache_last_written":load_timestamp,"elasticsearch_cache_hit":0,"elasticsearch_cache_miss":0,"exceeded_rate_limit":0}
 ## Load the disk cache to mem_cache on program start
 if use_disk_cache == True:
 	mem_cache = load_disk_cache()
 
 if var == '-d':
 	## Run the Whois network server
-	net_thread = threading.Thread(target=whois_server)
+	net_thread = threading.Thread(name="whois_server",target=whois_server)
 	net_thread.daemon = True
 	net_thread.start()
 	## Run the web server
+	if rate_limit_use_backlog == True:
+		backlog_questions = collections.deque([],rate_limit_backlog_size)
+		backlog_thread = threading.Thread(name="backlog_worker", target=backlog_worker)
+		backlog_thread.daemon = True
+		backlog_thread.start()
 	if enable_web_server == True:
 		web_server()
 
@@ -340,6 +420,11 @@ else:
 	## looks like query was run from command line
 	## write to the disk cache immediately when run from command line
 	disk_cache_write_interval=0
+	rate_limit_queries=0
 	answer = whois_lookup(var)
-	print(json.dumps(answer,indent=4,sort_keys=True,default=str))
+	try:
+		print(json.dumps(answer,indent=4,sort_keys=False,default=str))
+	except:
+		print(answer)
+
 
