@@ -2,7 +2,11 @@
 
 This proxy will handle whois lookup requests over a web api, via the command line, and from whois clients over port 43. The script is multi-threaded and supports caching whois lookup results in memory, on disk, and in elasticsearch. The script can send full whois lookup records in json format to syslog as well as elasticsearch. 
 
-This is a wrapper for the pyhton whois library.  
+## Requirements
+This is designed and tested using the python-whois module, which is different than the whois module. I've updated but not extensively tested it to also work with the whois module. The data formats between the 2 are NOT the same. 
+
+This should work in both Python2.7 and Python3.6
+
 
 ## Configuration:
 All configuration is performed via variables at the top of the script. 
