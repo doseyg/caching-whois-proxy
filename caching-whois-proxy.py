@@ -11,11 +11,17 @@ import sys, datetime
 import whois
 import requests, json
 import socket, threading, datetime, syslog, collections, time
-from urlparse import urlparse
-#import urllib
-from elasticsearch import Elasticsearch, helpers
-from BaseHTTPServer import BaseHTTPRequestHandler,HTTPServer
-#from http.server import BaseHTTPRequestHandler,HTTPServer
+if sys.version_info.major == 2:
+	from urlparse import urlparse
+	from BaseHTTPServer import BaseHTTPRequestHandler,HTTPServer
+elif sys.version_info.major == 3:
+	from urllib.parse import urlparse
+	from http.server import BaseHTTPRequestHandler,HTTPServer
+	unicode = str
+try:
+    from elasticsearch import Elasticsearch, helpers
+except ImportError:
+    print("elasticsearch module not installed; elasticsearch components won't work")
 
 ########### Global Configuration variables ################
 ## How long to cache a record before asking again, in days. Applies to all cache types
@@ -64,7 +70,10 @@ class webHandler(BaseHTTPRequestHandler):
 				self.send_header('Content-type','text/html')
 				self.end_headers()
 				html = '<html><body>Submit your Whois query<br><form action="/api"><input type="text" name="query"><br><input type="submit"></form><a href="/stats">Stats</a></body></html>'
-				self.wfile.write(html)
+				if sys.version_info.major == 3:
+					self.wfile.write(bytes(html, "utf-8"))
+				else:
+					self.wfile.write(html)
 			elif self.path=="/stats":
 				self.send_response(200)
 				self.send_header('Content-type','text/html')
@@ -78,7 +87,10 @@ class webHandler(BaseHTTPRequestHandler):
 				html += '<br>Mem_Cache Bytes:' + str(mem_cache_size) 
 				html += '<br>Exceeded Rate Limit: ' + str(stats['exceeded_rate_limit'])
 				html += '<br>Elasticsearch Hits:' + str(stats['elasticsearch_cache_hit']) + '</body></html>'
-				self.wfile.write(html)
+				if sys.version_info.major == 3:
+					self.wfile.write(bytes(html, "utf-8"))
+				else:
+					self.wfile.write(html)
 			elif self.path=="/config":
 				self.send_response(200)
 				self.send_header('Content-type','text/html')
@@ -88,7 +100,19 @@ class webHandler(BaseHTTPRequestHandler):
 				html += '<br>Cache Max Age:' + str(cache_max_age) 
 				html += '<br>rate_limit_queries:' + str(rate_limit_queries) 
 				html += '<br>Elasticsearch Hits:' + str(stats['elasticsearch_cache_hit']) + '</body></html>'
-				self.wfile.write(html)
+				if sys.version_info.major == 3:
+					self.wfile.write(bytes(html, "utf-8"))
+				else:
+					self.wfile.write(html)
+			elif self.path=="/api?dump_mem_cache":
+				self.send_response(200)
+				self.send_header('Content-type','text/html')
+				self.end_headers()
+				html = '<html><body><h2>Proxy Memory Cache Contents</h2><br> ' + str(json.dumps(mem_cache, default=str)) + '</body></html>'
+				if sys.version_info.major == 3:
+					self.wfile.write(bytes(html, "utf-8"))
+				else:
+					self.wfile.write(html)
 			elif self.path.startswith("/api?query"):
 				query = urlparse(self.path).query
 				#query = urllib.parse.urlparse(self.path).query
@@ -98,8 +122,10 @@ class webHandler(BaseHTTPRequestHandler):
 				self.send_response(200)
 				self.send_header('Content-type','text/json')
 				self.end_headers()
-				self.wfile.write(json.dumps(answer,indent=4, default=str))
-
+				if sys.version_info.major == 3:
+					self.wfile.write(bytes(json.dumps(answer,indent=4, default=str), "utf-8"))
+				else:
+					self.wfile.write(json.dumps(answer,indent=4, default=str))
 			elif self.path.startswith("/api?cache"):
 				query = urlparse(self.path).query
 				#query = urllib.parse.urlparse(self.path).query
@@ -109,7 +135,10 @@ class webHandler(BaseHTTPRequestHandler):
 				self.send_header('Content-type','text/html')
 				self.end_headers()
 				html = 'success'
-				self.wfile.write(html)
+				if sys.version_info.major == 3:
+					self.wfile.write(bytes(html, "utf-8"))
+				else:
+					self.wfile.write(html)
 				my_thread = threading.Thread(target=whois_lookup, args=(question,))
 				my_thread.start()
 			else:
@@ -260,7 +289,7 @@ def backlog_worker():
 					results = query_whois_internet(question)
 					logger("backlog - - - queried whois from backlog: " + str(question))
 					run=0
-		except IndexError, e:
+		except IndexError as e:
 			logger ('backlog - - - Queue is empty: ' + str(e) )
 			continue
 		except Exception as e:
@@ -323,11 +352,14 @@ def query_whois_internet(question):
 			backlog_questions.append(question)
 		return None
 	else:
-		results = whois.whois(question)
-		update_cache(question,results)
-		if threading.currentThread().getName() != 'backlog_worker':
-			rate_limit_timestamp=datetime.datetime.now()
-		return results
+                if "whois" in dir(whois):
+                    results = whois.whois(question)
+                elif "query" in dir(whois):
+                    results = whois.query(question).__dict__
+                update_cache(question,results)
+                if threading.currentThread().getName() != 'backlog_worker':
+                    rate_limit_timestamp=datetime.datetime.now()
+                return results
 
 
 def query_mem_cache(question):
@@ -403,6 +435,7 @@ if use_disk_cache == True:
 	mem_cache = load_disk_cache()
 
 if var == '-d':
+	print("logging to " + logfile)
 	## Run the Whois network server
 	net_thread = threading.Thread(name="whois_server",target=whois_server)
 	net_thread.daemon = True
