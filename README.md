@@ -24,4 +24,7 @@ python caching-whois-proxy -d
 ## Syslog
 The script can send records to syslog in JSON format. The logs will be written to the local syslog stream. If you want to forward them elsewhere, modify the rsyslog/syslog-ng configuration to forward  to a remote syslog server. You will need to change the code in send_to_syslog to change the facility or priority. The script does not currently support logging it's own operational logs to sysylog; they are written to a file defined by the logfile variable
   
+  
+ ## Troubleshooting
+ If you get an error stating "ImportError: No module named ordered_dict", you need to either downgrade urllib3 to 1.23 or upgrade requests.
 
