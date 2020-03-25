@@ -332,7 +332,15 @@ def update_cache(question,results):
 	if use_disk_cache == True:
 		flush_mem_cache_to_disk()
 	manage_mem_cache()
-
+	
+def json_validator(json_string):
+	try:
+		json_object = json.loads(json_string)
+		return json_string
+	except:
+		json_string = {}
+		return json_string
+	
 def query_whois_internet(question):
 	global rate_limit_timestamp
 	global rate_limit_use_backlog
@@ -352,10 +360,16 @@ def query_whois_internet(question):
 			backlog_questions.append(question)
 		return None
 	else:
-                if "whois" in dir(whois):
-                    results = whois.whois(question)
-                elif "query" in dir(whois):
-                    results = whois.query(question).__dict__
+                try:
+                    if "whois" in dir(whois):
+                        lookup_results = whois.whois(question)
+                    elif "query" in dir(whois):
+                        lookup)results = whois.query(question).__dict__
+	        except Exception as e:
+			logger("An error in the underlying python whois lookup module occured during the lookup of: " + str(question))
+			logger("    the error was: " + str(e) )
+			lookup_results = {}
+                results = json_validator(lookup_results)
                 update_cache(question,results)
                 if threading.currentThread().getName() != 'backlog_worker':
                     rate_limit_timestamp=datetime.datetime.now()
