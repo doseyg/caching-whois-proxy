@@ -19,7 +19,7 @@ python caching-whois-proxy -d
 
 /api?query=NAME lookup the whois record for NAME and return the results.
   
-/api?cache=NAME Immediatley returns a code 200, and then performs a lookup of NAME in the background, caching the results. Use this instead of query when you don't care about the whois lookups results and only want to ensure the domain is in the cache.
+/api?cache=NAME Immediatley returns a code 200, and then performs a lookup of NAME in the background, caching the results. Use this instead of query when you don't need the whois lookups results right now and only want to ensure the domain is in the cache.
 
 /api?dump_mem_cache Write the full content of the memcache to the webpage. Used for debugging.
   
