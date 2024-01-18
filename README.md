@@ -34,3 +34,4 @@ The script can send records to syslog in JSON format. The logs will be written t
  ## Troubleshooting
  If you get an error stating "ImportError: No module named ordered_dict", you need to either downgrade urllib3 to 1.23 or upgrade requests.
 
+<meta name="google-site-verification" content="IctWUuraJXFJEZZb2GB38zVJ_VM20M7glL2lupqHEjQ" />
